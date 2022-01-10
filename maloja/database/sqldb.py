@@ -3,6 +3,7 @@ import json
 import unicodedata
 import math
 from datetime import datetime
+import time
 
 from ..globalconf import data_dir
 
@@ -138,7 +139,6 @@ def scrobble_dict_to_db(info):
 		"timestamp":info['time'],
 		"origin":info['origin'],
 		"duration":info['duration'],
-		"extra":info['extra'],
 		"track_id":get_track_id(info['track'])
 	}
 
@@ -167,25 +167,113 @@ def add_scrobble(scrobbledict):
 
 def add_scrobbles(scrobbleslist):
 
+	if len(scrobbleslist) > 3:
+		# create tracks ahead of time, we don't actually care about the ids because we'll
+		# just get them later. this is literally the polar opposite of elegance, but at this
+		# point i'm getting sick of sql. i'll rework it later.
+		tracks = [scrobble['track'] for scrobble in scrobbleslist]
+		get_track_ids(tracks)
+
+
 	ops = [
 		DB['scrobbles'].insert().values(
 			**scrobble_dict_to_db(s)
 		) for s in scrobbleslist
 	]
 
+
 	with engine.begin() as conn:
 		for op in ops:
-			try:
-				conn.execute(op)
-			except:
-				pass
+			conn.execute(op)
+
 
 
 ### these will 'get' the ID of an entity, creating it if necessary
 
 def get_track_id(trackdict):
-	ntitle = normalize_name(trackdict['title'])
-	artist_ids = [get_artist_id(a) for a in trackdict['artists']]
+	return get_track_ids([trackdict])[0]
+
+def get_track_ids(trackdicts):
+	#print("getting",len(trackdicts),"track ids")
+
+	# generating artists ahead of time for performance
+	get_artist_ids([a for track in trackdicts for a in track['artists']])
+
+	# prepare each entry for checking
+	data = [{'id':None,'trackdict':t,'op':None} for t in trackdicts]
+	for entry in data:
+		nname = normalize_name(entry['trackdict']['title'])
+		artist_ids = get_artist_ids(entry['trackdict']['artists'])
+
+		entry['artist_ids'] = artist_ids
+
+
+	# check existence for each entry
+	with engine.begin() as conn:
+		for entry in data:
+
+			entry['tmptable'] = sql.Table(
+				f'tmptable{time.time_ns()}', meta,
+				sql.Column('artist',sql.String),
+				prefixes=['TEMPORARY']
+			)
+			entry['tmptable'].create(conn)
+			conn.execute(entry['tmptable'].insert().values([
+				{'artist':a}
+				for a in artist_ids
+			]))
+
+			jointable = sql.join(
+				DB['tracks'],
+				DB['trackartists']
+			)
+			jointable2 = sql.join(
+				jointable,
+				entry['tmptable'],
+				entry['tmptable'].c.artist == DB['trackartists'].c.artist_id
+			)
+
+			entry['op'] = jointable2.select(
+				DB['tracks'].c.id
+			).group_by(
+				DB['tracks'].c.id
+			).having(
+				sql.func.count('*') == sql.func.count(entry['tmptable'].c.artist)
+			).where(
+				DB['tracks'].c.title_normalized==nname
+			)
+
+
+			result = conn.execute(entry['op']).all()
+			if len(result) > 0: entry['id'] = result[0].id
+
+			entry['tmptable'].drop(conn)
+
+	# prepare each remaining entry for creation
+	for entry in data:
+		if entry['id'] is None:
+			entry['op'] = DB['tracks'].insert().values(
+				**track_dict_to_db(entry['trackdict'])
+			)
+
+	# create for each entry
+	with engine.begin() as conn:
+		for entry in data:
+			if entry['id'] is None:
+				result = conn.execute(entry['op'])
+				entry['id'] = result.inserted_primary_key[0]
+
+				conn.execute(
+					DB['trackartists'].insert().values([
+						{'track_id':entry['id'],'artist_id':a}
+						for a in entry['artist_ids']
+					])
+				)
+
+
+	return [entry['id'] for entry in data]
+
+
 
 
 
@@ -230,29 +318,42 @@ def get_track_id(trackdict):
 		#print("Created",trackdict['title'],track_id)
 		return track_id
 
-def get_artist_id(artistname):
-	nname = normalize_name(artistname)
-	#print("looking for",nname)
 
-	with engine.begin() as conn:
-		op = DB['artists'].select(
+def get_artist_id(artistname):
+	return get_artist_ids([artistname])[0]
+
+def get_artist_ids(artistnames):
+	#print("getting",len(artistnames),"artist ids")
+
+	data = [{'id':None,'artistdict':a,'op':None} for a in artistnames]
+	for entry in data:
+		nname = normalize_name(entry['artistdict'])
+		#print("looking for",nname)
+		entry['op'] = DB['artists'].select(
 			DB['artists'].c.id
 		).where(
 			DB['artists'].c.name_normalized==nname
 		)
-		result = conn.execute(op).all()
-	for row in result:
-		#print("ID for",artistname,"was",row[0])
-		return row.id
 
 	with engine.begin() as conn:
-		op = DB['artists'].insert().values(
-			name=artistname,
-			name_normalized=nname
-		)
-		result = conn.execute(op)
-		#print("Created",artistname,result.inserted_primary_key)
-		return result.inserted_primary_key[0]
+		for entry in data:
+			result = conn.execute(entry['op']).all()
+			if len(result) > 0: entry['id'] = result[0].id
+
+	for entry in data:
+		if entry['id'] is None:
+			entry['op'] = DB['artists'].insert().values(
+				**artist_dict_to_db(entry['artistdict'])
+			)
+
+	with engine.begin() as conn:
+		for entry in data:
+			if entry['id'] is None:
+				result = conn.execute(entry['op'])
+				entry['id'] = result.inserted_primary_key[0]
+
+
+	return [entry['id'] for entry in data]
 
 
 
