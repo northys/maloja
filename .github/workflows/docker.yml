@@ -13,13 +13,6 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b
 
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@dd4fa0671be5250ee6f50aedf4cb05514abda2c7
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@dd4fa0671be5250ee6f50aedf4cb05514abda2c7
